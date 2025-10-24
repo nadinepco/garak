@@ -101,12 +101,34 @@ class Evaluator:
                             )
 
                         triggers = attempt.notes.get("triggers", None)
+                        
+                        # Convert output to dict, handling cases where it might not be a dataclass
+                        output_obj = attempt.all_outputs[idx]
+                        if hasattr(output_obj, '__dataclass_fields__'):
+                            output_dict = asdict(output_obj)
+                        elif isinstance(output_obj, dict):
+                            output_dict = output_obj
+                        elif isinstance(output_obj, str):
+                            output_dict = {"text": output_obj}
+                        elif hasattr(output_obj, 'text'):
+                            # Manually convert Message-like object to dict
+                            output_dict = {
+                                "text": getattr(output_obj, "text", None),
+                                "lang": getattr(output_obj, "lang", None),
+                                "data_path": getattr(output_obj, "data_path", None),
+                                "data_type": getattr(output_obj, "data_type", None),
+                                "data_checksum": getattr(output_obj, "data_checksum", None),
+                                "notes": getattr(output_obj, "notes", {}),
+                            }
+                        else:
+                            output_dict = {"text": str(output_obj)}
+                        
                         _config.transient.hitlogfile.write(
                             json.dumps(
                                 {
                                     "goal": attempt.goal,
                                     "prompt": asdict(attempt.prompt),
-                                    "output": asdict(attempt.outputs[idx]),
+                                    "output": output_dict,
                                     "triggers": triggers,
                                     "score": score,
                                     "run_id": str(_config.transient.run_id),
@@ -124,7 +146,6 @@ class Evaluator:
                         )
 
             outputs_evaluated = passes + fails
-            outputs_processed = passes + fails + nones
 
             if _config.system.narrow_output:
                 print_func = self.print_results_narrow
@@ -204,7 +225,7 @@ class Evaluator:
             for m in messages:
                 try:
                     print("❌", m.strip().replace("\n", " "))
-                except:
+                except (AttributeError, TypeError, UnicodeError):
                     pass
 
     def print_results_narrow(self, detector_name, passes, evals, messages=list()):
@@ -249,7 +270,7 @@ class Evaluator:
             for m in messages:
                 try:
                     print("❌", m.strip().replace("\n", " "))
-                except:
+                except (AttributeError, TypeError, UnicodeError):
                     pass
 
 

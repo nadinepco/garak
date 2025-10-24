@@ -8,7 +8,7 @@ import logging
 from typing import List, Union
 
 
-import langchain.llms
+from langchain_community import llms
 
 from garak import _config
 from garak.attempt import Message, Conversation
@@ -55,7 +55,7 @@ class LangChainLLMGenerator(Generator):
 
         try:
             # this might need some special handling to allow tests
-            llm = getattr(langchain.llms, self.name)()
+            llm = getattr(llms, self.name)()
         except Exception as e:
             logging.error("Failed to import Langchain module: %s", repr(e))
             raise e

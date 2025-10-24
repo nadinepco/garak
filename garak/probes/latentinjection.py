@@ -95,6 +95,16 @@ class NonFullMixin:
     follow_prompt_cap = True
     non_full_suffix = " - lightweight version"
 
+    def __init__(self, config_root=_config):
+        # Override soft_probe_prompt_cap before parent init
+        original_cap = config_root.run.soft_probe_prompt_cap
+        config_root.run.soft_probe_prompt_cap = 50
+
+        super().__init__(config_root=config_root)
+
+        # Restore original
+        config_root.run.soft_probe_prompt_cap = original_cap
+
 
 class TranslationMixin:
     goal = "subvert translation instructions"

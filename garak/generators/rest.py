@@ -8,6 +8,7 @@ Generic Module for REST API connections
 
 import json
 import logging
+import uuid
 from typing import List, Union
 import requests
 
@@ -43,6 +44,16 @@ class RestGenerator(Generator):
         "request_timeout": 20,
         "proxies": None,
         "verify_ssl": True,
+        "response_streaming": False,
+        "stream_event_filter": None,
+        "stream_role_filter": None,
+        "stream_content_field": "content",
+        "accumulate_stream": False,
+        "send_raw_json": False,
+        "conversation_create_endpoint": None,
+        "conversation_delete_endpoint": None,
+        "conversation_base_uri": None,
+        "conversation_message_endpoint": None,
     }
 
     ENV_VAR = "REST_API_KEY"
@@ -71,6 +82,16 @@ class RestGenerator(Generator):
         "top_k",
         "proxies",
         "verify_ssl",
+        "response_streaming",
+        "stream_event_filter",
+        "stream_role_filter",
+        "stream_content_field",
+        "accumulate_stream",
+        "send_raw_json",
+        "conversation_create_endpoint",
+        "conversation_delete_endpoint",
+        "conversation_base_uri",
+        "conversation_message_endpoint",
     )
 
     def __init__(self, uri=None, config_root=_config):
@@ -102,13 +123,29 @@ class RestGenerator(Generator):
                     "RestGenerator response_json is True but response_json_field is an empty string. If the root object is the target object, use a JSONPath."
                 )
 
-        if self.name is None:
-            self.name = self.uri
+        # Check if conversation management is enabled
+        self.conversation_management_enabled = (
+            self.conversation_create_endpoint is not None
+            and self.conversation_delete_endpoint is not None
+            and self.conversation_base_uri is not None
+            and self.conversation_message_endpoint is not None
+        )
 
-        if self.uri is None:
-            raise ValueError(
-                "No REST endpoint URI definition found in either constructor param, JSON, or --target_name. Please specify one."
-            )
+        if self.conversation_management_enabled:
+            logging.info("Conversation management enabled - will create/delete conversations automatically")
+            self.conversation_id = None  # Will be set per request
+            # Use conversation_base_uri as the name if uri is not set
+            if self.name is None:
+                self.name = self.conversation_base_uri
+        else:
+            # Traditional mode - static URI
+            if self.name is None:
+                self.name = self.uri
+
+            if self.uri is None:
+                raise ValueError(
+                    "No REST endpoint URI definition found in either constructor param, JSON, or --target_name. Please specify one."
+                )
 
         self.fullname = f"{self.generator_family_name} {self.name}"
 
@@ -175,6 +212,7 @@ class RestGenerator(Generator):
         Interesting values are:
         * $KEY - the API key set as an object variable
         * $INPUT - the prompt text
+        * $UUID - a randomly generated UUID (new UUID for each call)
 
         $KEY is only set if the relevant environment variable is set; the
         default variable name is REST_API_KEY but this can be overridden.
@@ -189,7 +227,185 @@ class RestGenerator(Generator):
                 output = output.replace("$KEY", self.escape_function(self.api_key))
             else:
                 output = output.replace("$KEY", self.api_key)
+
+        # Replace $UUID with a new UUID
+        if "$UUID" in output:
+            output = output.replace("$UUID", str(uuid.uuid4()))
+
         return output.replace("$INPUT", self.escape_function(text))
+
+    def _handle_streaming_response(
+        self, resp: requests.Response
+    ) -> List[Union[Message, None]]:
+        """Handle Server-Sent Events (SSE) streaming responses
+
+        Processes streaming responses line by line, parsing SSE format with
+        'event: <type>' and 'data: <json>' lines. Filters by event type and
+        role (if configured), extracts content, and returns the result.
+
+        :param resp: The streaming response object from requests
+        :return: List containing a single Message with the accumulated content, or [None] if no content found
+        """
+        accumulated_content = [] if self.accumulate_stream else None
+        current_event = None
+        last_content = None
+
+        try:
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+
+                try:
+                    decoded_line = line.decode("utf-8")
+
+                    # Skip empty lines and comments
+                    if not decoded_line.strip() or decoded_line.startswith(":"):
+                        continue
+
+                    # Parse SSE format: "event: type" or "data: json"
+                    if decoded_line.startswith("event: "):
+                        current_event = decoded_line[7:].strip()
+                    elif decoded_line.startswith("data: "):
+                        json_str = decoded_line[6:]
+
+                        # Check for stream termination signal
+                        if json_str.strip() == "[DONE]":
+                            break
+
+                        try:
+                            json_obj = json.loads(json_str)
+
+                            # Apply event type filter if configured
+                            if self.stream_event_filter and current_event != self.stream_event_filter:
+                                continue
+
+                            # Apply role filter if configured
+                            if self.stream_role_filter:
+                                role = json_obj.get("role")
+                                if role != self.stream_role_filter:
+                                    continue
+
+                            # Extract content from the configured field
+                            content = json_obj.get(self.stream_content_field)
+                            if content:
+                                if self.accumulate_stream:
+                                    accumulated_content.append(content)
+                                else:
+                                    last_content = content
+
+                        except json.JSONDecodeError as jde:
+                            logging.warning(
+                                "Could not parse JSON in streaming data: %s",
+                                json_str,
+                                exc_info=jde,
+                            )
+                            continue
+
+                except UnicodeDecodeError as ude:
+                    logging.warning(
+                        "Could not decode streaming line: %s", line, exc_info=ude
+                    )
+                    continue
+
+        except Exception as e:
+            logging.error(
+                "Error processing streaming response from %s", self.uri, exc_info=e
+            )
+            return [None]
+
+        # Return accumulated or last content
+        if self.accumulate_stream:
+            if accumulated_content:
+                return [Message(text="".join(accumulated_content))]
+        else:
+            if last_content is not None:
+                return [Message(text=str(last_content))]
+
+        # No content found
+        logging.warning("No content extracted from streaming response from %s", self.uri)
+        return [None]
+
+    def _get_populated_headers(self) -> dict:
+        """Get headers with $KEY placeholder replaced by actual API key.
+
+        :return: Dictionary of headers with placeholders populated
+        :raises: APIKeyMissingError if $KEY is in headers but api_key is not set
+        """
+        request_headers = dict(self.headers)
+        for k, v in self.headers.items():
+            if "$KEY" in v:
+                if self.api_key is None:
+                    raise APIKeyMissingError(
+                        f"Header requires an API key but {self.key_env_var} env var isn't set"
+                    )
+                request_headers[k] = v.replace("$KEY", self.api_key)
+        return request_headers
+
+    def _create_conversation(self) -> str:
+        """Create a new conversation and return its ID.
+
+        :return: The conversation ID as a string
+        :raises: ConnectionError if conversation creation fails
+        """
+        url = f"{self.conversation_base_uri}{self.conversation_create_endpoint}"
+        request_headers = self._get_populated_headers()
+
+        try:
+            logging.debug(f"Creating conversation at {url}")
+            logging.debug(f"Headers: {request_headers}")
+            resp = requests.post(
+                url,
+                headers=request_headers,
+                timeout=self.request_timeout,
+                proxies=self.proxies,
+                verify=self.verify_ssl,
+            )
+            resp.raise_for_status()
+
+            # Response should be a conversation ID (string)
+            conversation_id = resp.json()
+            logging.info(f"Created conversation with ID: {conversation_id}")
+            return conversation_id
+
+        except Exception as e:
+            logging.error(f"Failed to create conversation: {e}")
+            raise ConnectionError(f"Failed to create conversation at {url}: {e}") from e
+
+    def _delete_conversation(self, conversation_id: str) -> bool:
+        """Delete a conversation by ID.
+
+        :param conversation_id: The conversation ID to delete
+        :return: True if successful, False otherwise
+        """
+        if not conversation_id:
+            return False
+
+        # Replace {conversation_id} placeholder in endpoint
+        endpoint = self.conversation_delete_endpoint.replace("{conversation_id}", conversation_id)
+        url = f"{self.conversation_base_uri}{endpoint}"
+
+        try:
+            request_headers = self._get_populated_headers()
+        except APIKeyMissingError:
+            logging.warning("Cannot delete conversation - API key not set")
+            return False
+
+        try:
+            logging.debug(f"Deleting conversation {conversation_id} at {url}")
+            resp = requests.delete(
+                url,
+                headers=request_headers,
+                timeout=self.request_timeout,
+                proxies=self.proxies,
+                verify=self.verify_ssl,
+            )
+            resp.raise_for_status()
+            logging.info(f"Deleted conversation {conversation_id}")
+            return True
+
+        except Exception as e:
+            logging.warning(f"Failed to delete conversation {conversation_id}: {e}")
+            return False
 
     @backoff.on_exception(
         backoff.fibo, (RateLimitHit, GarakBackoffTrigger), max_value=70
@@ -202,6 +418,18 @@ class RestGenerator(Generator):
         :param prompt: the input to be placed into the request template and sent to the endpoint
         :type prompt: str
         """
+
+        # Handle conversation management if enabled
+        if self.conversation_management_enabled:
+            # Create a new conversation for this request
+            self.conversation_id = self._create_conversation()
+
+            # Build the URI dynamically with the conversation_id
+            endpoint = self.conversation_message_endpoint.replace("{conversation_id}", self.conversation_id)
+            request_uri = f"{self.conversation_base_uri}{endpoint}"
+        else:
+            # Use the static URI
+            request_uri = self.uri
 
         # should this support a serialized Conversation?
         request_data = self._populate_template(
@@ -216,16 +444,33 @@ class RestGenerator(Generator):
         # the prompt should not be sent via data when using a GET request. Prompt should be
         # serialized as parameters, in general a method could be created to add
         # the prompt data to a request via params or data based on the action verb
-        data_kw = "params" if self.http_function == requests.get else "data"
+        if self.send_raw_json:
+            # Send as parsed JSON object (json= parameter in requests)
+            data_kw = "params" if self.http_function == requests.get else "json"
+            request_data = json.loads(request_data) if isinstance(request_data, str) else request_data
+        else:
+            # Send as string data (data= parameter in requests)
+            data_kw = "params" if self.http_function == requests.get else "data"
+
         req_kArgs = {
             data_kw: request_data,
             "headers": request_headers,
             "timeout": self.request_timeout,
             "proxies": self.proxies,
             "verify": self.verify_ssl,
+            "stream": self.response_streaming,
         }
+
+        # Debug logging
+        logging.info("REST Generator Request Details:")
+        logging.info(f"  URI: {request_uri}")
+        logging.info(f"  Method: {self.method}")
+        logging.info(f"  Data keyword: {data_kw}")
+        logging.info(f"  Request data: {request_data}")
+        logging.info(f"  Headers: {request_headers}")
+
         try:
-            resp = self.http_function(self.uri, **req_kArgs)
+            resp = self.http_function(request_uri, **req_kArgs)
         except UnicodeEncodeError as uee:
             # only RFC2616 (latin-1) is guaranteed
             # don't print a repr, this might leak api keys
@@ -240,33 +485,60 @@ class RestGenerator(Generator):
                 "REST skip prompt: %s - %s, uri: %s",
                 resp.status_code,
                 resp.reason,
-                self.uri,
+                request_uri,
             )
+            # Clean up conversation if enabled
+            if self.conversation_management_enabled and self.conversation_id:
+                self._delete_conversation(self.conversation_id)
             return [None]
 
         if resp.status_code in self.ratelimit_codes:
+            # Clean up conversation if enabled
+            if self.conversation_management_enabled and self.conversation_id:
+                self._delete_conversation(self.conversation_id)
             raise RateLimitHit(
-                f"Rate limited: {resp.status_code} - {resp.reason}, uri: {self.uri}"
+                f"Rate limited: {resp.status_code} - {resp.reason}, uri: {request_uri}"
             )
 
         if str(resp.status_code)[0] == "3":
+            # Clean up conversation if enabled
+            if self.conversation_management_enabled and self.conversation_id:
+                self._delete_conversation(self.conversation_id)
             raise NotImplementedError(
-                f"REST URI redirection: {resp.status_code} - {resp.reason}, uri: {self.uri}"
+                f"REST URI redirection: {resp.status_code} - {resp.reason}, uri: {request_uri}"
             )
 
         if str(resp.status_code)[0] == "4":
+            # Clean up conversation if enabled
+            if self.conversation_management_enabled and self.conversation_id:
+                self._delete_conversation(self.conversation_id)
             raise ConnectionError(
-                f"REST URI client error: {resp.status_code} - {resp.reason}, uri: {self.uri}"
+                f"REST URI client error: {resp.status_code} - {resp.reason}, uri: {request_uri}"
             )
 
         if str(resp.status_code)[0] == "5":
-            error_msg = f"REST URI server error: {resp.status_code} - {resp.reason}, uri: {self.uri}"
+            error_msg = f"REST URI server error: {resp.status_code} - {resp.reason}, uri: {request_uri}"
+            # Clean up conversation if enabled
+            if self.conversation_management_enabled and self.conversation_id:
+                self._delete_conversation(self.conversation_id)
             if self.retry_5xx:
                 raise GarakBackoffTrigger(error_msg)
             raise ConnectionError(error_msg)
 
+        # Handle SSE streaming responses
+        if self.response_streaming:
+            result = self._handle_streaming_response(resp)
+            # Clean up conversation after successful response
+            if self.conversation_management_enabled and self.conversation_id:
+                self._delete_conversation(self.conversation_id)
+            return result
+
         if not self.response_json:
-            return [Message(str(resp.text))]
+            result = [Message(text=str(resp.text))]
+            # Clean up conversation after successful response
+            if self.conversation_management_enabled and self.conversation_id:
+                self._delete_conversation(self.conversation_id)
+            return result
 
         response_object = json.loads(resp.content)
 
@@ -303,9 +575,26 @@ class RestGenerator(Generator):
                     "RestGenerator JSONPath in response_json_field yielded nothing. Response content: %s"
                     % repr(resp.content)
                 )
+                # Clean up conversation if enabled
+                if self.conversation_management_enabled and self.conversation_id:
+                    self._delete_conversation(self.conversation_id)
                 return [None]
 
-        return [Message(r) for r in response]
+        # Clean up conversation after successful response
+        if self.conversation_management_enabled and self.conversation_id:
+            self._delete_conversation(self.conversation_id)
+
+        # Ensure Message objects are created with string text values
+        messages = []
+        for r in response:
+            if r is None:
+                messages.append(None)
+            elif isinstance(r, str):
+                messages.append(Message(text=r))
+            else:
+                # Convert non-string values to JSON string
+                messages.append(Message(text=json.dumps(r)))
+        return messages
 
 
 DEFAULT_CLASS = "RestGenerator"

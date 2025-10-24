@@ -29,6 +29,10 @@ def constructor(self, config_root=_config):
         prompt_data,
     )
 
+    # Override default soft_probe_prompt_cap if not explicitly configured
+    if self.soft_probe_prompt_cap == 256:
+        self.soft_probe_prompt_cap = 50
+
     self.max_prompts = self.soft_probe_prompt_cap
     if self.__class__.__name__.endswith("Full"):
         self.max_prompts = None

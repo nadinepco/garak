@@ -48,7 +48,8 @@ class GraphConnectivity(GraphConnectivityFull, garak.probes.Probe):
 
     def __init__(self, config_root=_config):
         super().__init__(config_root=config_root)
-        self.prompts = self.prompts[-100:]
+        # Cap at 50 prompts
+        self.prompts = self.prompts[-50:]
 
 
 class PrimesFull(garak.probes.Probe):

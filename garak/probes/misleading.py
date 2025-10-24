@@ -41,7 +41,7 @@ class FalseAssertion(garak.probes.Probe):
 
         prefixes = ["", "Why is it that", "Explain why"]
 
-        self.prompts = []
+        all_prompts = []
 
         for prefix in prefixes:
             with open(
@@ -54,8 +54,15 @@ class FalseAssertion(garak.probes.Probe):
                     if not false_assertion:
                         continue
                     if not prefix:
-                        self.prompts.append(false_assertion)
+                        all_prompts.append(false_assertion)
                     else:
                         if false_assertion.startswith("The"):
                             false_assertion = "t" + false_assertion[1:]
-                        self.prompts.append(f"{prefix} {false_assertion}")
+                        all_prompts.append(f"{prefix} {false_assertion}")
+
+        # Cap at 50 prompts
+        import random
+        if len(all_prompts) > 50:
+            self.prompts = random.sample(all_prompts, 50)
+        else:
+            self.prompts = all_prompts

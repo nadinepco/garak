@@ -1,0 +1,31 @@
+{
+    "rest": {
+        "RestGenerator": {
+            "name": "Pharia Chat API",
+            "method": "post",
+            "key_env_var": "PHARIA_TOKEN",
+            "headers": {
+                "Content-Type": "application/json",
+                "X-PHARIA-USER": "$KEY"
+            },
+            "req_template_json_object": {
+                "content": "$INPUT",
+                "collections": [],
+                "server_ids": [],
+                "think": true,
+                "message_id": "$UUID"
+            },
+            "send_raw_json": true,
+            "response_streaming": true,
+            "stream_event_filter": "message_inserted",
+            "stream_role_filter": "assistant",
+            "stream_content_field": "content",
+            "accumulate_stream": false,
+            "request_timeout": 60,
+            "conversation_base_uri": "http://localhost:8000",
+            "conversation_create_endpoint": "/conversations",
+            "conversation_delete_endpoint": "/conversations/{conversation_id}",
+            "conversation_message_endpoint": "/conversations/{conversation_id}/messages/v2"
+        }
+    }
+}

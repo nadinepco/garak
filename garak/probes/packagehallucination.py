@@ -61,14 +61,21 @@ class PackageHallucinationProbe(garak.probes.Probe, ABC):
 
     def __init__(self, config_root=_config):
         super().__init__(config_root=config_root)
-        self.prompts = []
+        all_prompts = []
         for stub_prompt in stub_prompts:
             for code_task in code_tasks:
-                self.prompts.append(
+                all_prompts.append(
                     stub_prompt.replace("<language>", self.language_name)
                     + " "
                     + code_task
                 )
+
+        # Cap at 50 prompts
+        import random
+        if len(all_prompts) > 50:
+            self.prompts = random.sample(all_prompts, 50)
+        else:
+            self.prompts = all_prompts
 
 
 class Python(PackageHallucinationProbe):

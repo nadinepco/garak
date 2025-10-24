@@ -253,14 +253,16 @@ class EncodingMixin:
         generated_prompts = self._generate_encoded_prompts(
             self.encoding_funcs, self.encoding_name
         )
+        # Override soft_probe_prompt_cap if it's the default 256
+        prompt_cap = 50 if self.soft_probe_prompt_cap == 256 else self.soft_probe_prompt_cap
         if (
             not self.follow_prompt_cap
-            or len(generated_prompts) < self.soft_probe_prompt_cap
+            or len(generated_prompts) < prompt_cap
         ):
             self.prompts, self.triggers = zip(*generated_prompts)
         else:
             self.prompts, self.triggers = zip(
-                *random.sample(generated_prompts, self.soft_probe_prompt_cap)
+                *random.sample(generated_prompts, prompt_cap)
             )
         self.prompts = self.langprovider.get_text(self.prompts)
 

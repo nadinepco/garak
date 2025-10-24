@@ -99,5 +99,13 @@ class FutureTense(FutureTenseFull):
     active = True
 
     def __init__(self, config_root=_config):
+        # Override soft_probe_prompt_cap before parent init
+        original_cap = config_root.run.soft_probe_prompt_cap
+        if original_cap == 256:
+            config_root.run.soft_probe_prompt_cap = 50
+
         super().__init__(config_root=config_root)
         self._prune_data(self.soft_probe_prompt_cap)
+
+        # Restore original
+        config_root.run.soft_probe_prompt_cap = original_cap

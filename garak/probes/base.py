@@ -594,7 +594,8 @@ class TreeSearchProbe(Probe):
             all_completed_attempts += attempts_completed
 
             node_results = [
-                1.0 if s > self.per_generation_threshold else 0 for s in node_results
+                1.0 if s is not None and s > self.per_generation_threshold else 0
+                for s in node_results
             ]
             if len(node_results) > 0:
                 mean_score = sum(node_results) / len(node_results)
